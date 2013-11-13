@@ -1,0 +1,12 @@
+body {
+    margin-top: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.navbar-brand {
+    padding: 5px 15px;
+}
+
+.navbar-brand img {
+    height: 38px;
+}
