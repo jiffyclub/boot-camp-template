@@ -10,7 +10,7 @@ practicing control flow stuctures and quickly seeing the results.
 
 import copy
 import collections
-import itertools
+import json
 import numbers
 import os
 import sys
@@ -21,11 +21,12 @@ from operator import iadd
 from functools import reduce
 
 from IPython.display import HTML, display, clear_output
+from IPython.display import Image as ipyImage
 
 __all__ = ('Block', 'BlockGrid', 'Pixel', 'ImageGrid',
            'InvalidColorSpec', 'ShapeMismatch', 'show_color',
-           'embed_colorpicker', 'colors', '__version__')
-__version__ = '1.6dev'
+           'embed_colorpicker', 'colors', 'fui_colors', '__version__')
+__version__ = '1.8dev'
 
 _TABLE = ('<style type="text/css">'
           'table.blockgrid {{border: none;}}'
@@ -46,6 +47,10 @@ _ROW_SLICE = 'row slice'
 _DOUBLE_SLICE = 'double slice'
 
 _SMALLEST_BLOCK = 1
+
+_POST_URL = 'http://ipythonblocks.org/post'
+_GET_URL_PUBLIC = 'http://ipythonblocks.org/get/{0}'
+_GET_URL_SECRET = 'http://ipythonblocks.org/get/secret/{0}'
 
 
 class InvalidColorSpec(Exception):
@@ -118,6 +123,86 @@ def _flatten(thing, ignore_types=(str,)):
                 yield x
     else:
         yield thing
+
+
+def _parse_str_cell_spec(cells, length):
+    """
+    Parse a single string cell specification representing either a single
+    integer or a slice.
+
+    Parameters
+    ----------
+    cells : str
+        E.g. '5' for an int or '5:9' for a slice.
+    length : int
+        The number of items in the user's In history list. Used for
+        normalizing slices.
+
+    Returns
+    -------
+    cell_nos : list of int
+
+    """
+    if ':' not in cells:
+        return _parse_cells_spec(int(cells), length)
+
+    else:
+        return _parse_cells_spec(slice(*[int(x) if x else None
+                                         for x in cells.split(':')]),
+                                 length)
+
+
+def _parse_cells_spec(cells, length):
+    """
+    Used by _get_code_cells to parse a cell specification string into an
+    ordered list of cell numbers.
+
+    Parameters
+    ----------
+    cells : str, int, or slice
+        Specification of which cells to retrieve. Can be a single number,
+        a slice, or a combination of either separated by commas.
+    length : int
+        The number of items in the user's In history list. Used for
+        normalizing slices.
+
+    Returns
+    -------
+    cell_nos : list of int
+        Ordered list of cell numbers derived from spec.
+
+    """
+    if isinstance(cells, int):
+        return [cells]
+
+    elif isinstance(cells, slice):
+        return list(range(*cells.indices(length)))
+
+    else:
+        # string parsing
+        return sorted(set(_flatten(_parse_str_cell_spec(s, length)
+                                   for s in cells.split(','))))
+
+
+def _get_code_cells(cells):
+    """
+    Get the inputs of the specified cells from the notebook.
+
+    Parameters
+    ----------
+    cells : str, int, or slice
+        Specification of which cells to retrieve. Can be a single number,
+        a slice, or a combination of either separated by commas.
+
+    Returns
+    -------
+    code : list of str
+        Contents of cells as strings in chronological order.
+
+    """
+    In = get_ipython().user_ns['In']
+    cells = _parse_cells_spec(cells, len(In))
+    return [In[x] for x in cells]
 
 
 class Block(object):
@@ -357,6 +442,13 @@ class BlockGrid(object):
 
         self._lines_on = value
 
+    def __eq__(self, other):
+        if not isinstance(other, BlockGrid):
+            return False
+        else:
+            # compare the underlying grids
+            return self._grid == other._grid
+
     def _view_from_grid(self, grid):
         """
         Make a new grid from a list of lists of Block objects.
@@ -535,6 +627,94 @@ class BlockGrid(object):
         time.sleep(display_time)
         clear_output()
 
+    def _calc_image_size(self):
+        """
+        Calculate the size, in pixels, of the grid as an image.
+
+        Returns
+        -------
+        px_width : int
+        px_height : int
+
+        """
+        px_width = self._block_size * self._width
+        px_height = self._block_size * self._height
+
+        if self._lines_on:
+            px_width += self._width + 1
+            px_height += self._height + 1
+
+        return px_width, px_height
+
+    def _write_image(self, fp, format='png'):
+        """
+        Write an image of the current grid to a file-object.
+
+        Parameters
+        ----------
+        fp : file-like
+            A file-like object such as an open file pointer or
+            a StringIO/BytesIO instance.
+        format : str, optional
+            An image format that will be understood by PIL,
+            e.g. 'png', 'jpg', 'gif', etc.
+
+        """
+        try:
+            # PIL
+            import Image
+            import ImageDraw
+        except ImportError:
+            # pillow
+            from PIL import Image, ImageDraw
+
+        im = Image.new(
+            mode='RGB', size=self._calc_image_size(), color=(255, 255, 255))
+        draw = ImageDraw.Draw(im)
+
+        _bs = self._block_size
+
+        for r in range(self._height):
+            for c in range(self._width):
+                px_r = r * _bs
+                px_c = c * _bs
+                if self._lines_on:
+                    px_r += r + 1
+                    px_c += c + 1
+
+                rect = ((px_c, px_r), (px_c + _bs - 1, px_r + _bs - 1))
+                draw.rectangle(rect, fill=self._grid[r][c].rgb)
+
+        im.save(fp, format=format)
+
+    def show_image(self):
+        """
+        Embed grid in the notebook as a PNG image.
+
+        """
+        if sys.version_info[0] == 2:
+            from StringIO import StringIO as BytesIO
+        elif sys.version_info[0] == 3:
+            from io import BytesIO
+
+        im = BytesIO()
+        self._write_image(im)
+        display(ipyImage(data=im.getvalue(), format='png'))
+
+    def save_image(self, filename):
+        """
+        Save an image representation of the grid to a file.
+        Image format will be inferred from file extension.
+
+        Parameters
+        ----------
+        filename : str
+            Name of file to save to.
+
+        """
+        with open(filename, 'wb') as f:
+            self._write_image(f, format=filename.split('.')[-1])
+
     def to_text(self, filename=None):
         """
         Write a text file containing the size and block color information
@@ -566,6 +746,144 @@ class BlockGrid(object):
 
         if filename:
             f.close()
+
+    def _to_simple_grid(self):
+        """
+        Make a simple representation of the table: nested lists of
+        of the rows containing tuples of (red, green, blue, size)
+        for each of the blocks.
+
+        Returns
+        -------
+        grid : list of lists
+            No matter the class this method is called on the returned
+            grid will be Python-style: row oriented with the top-left
+            block in the [0][0] position.
+
+        """
+        return [[(x.red, x.green, x.blue, x.size) for x in row]
+                for row in self._grid]
+
+    def _construct_post_request(self, code_cells, secret):
+        """
+        Construct the request dictionary that will be posted
+        to ipythonblocks.org.
+
+        Parameters
+        ----------
+        code_cells : int, str, slice, or None
+            Specify any code cells to be sent and displayed with the grid.
+            You can specify a single cell, a Python, slice, or a combination
+            as a string separated by commas.
+
+            For example, '3,5,8:10' would send cells 3, 5, 8, and 9.
+        secret : bool
+            If True, this grid will not be shown randomly on ipythonblocks.org.
+
+        Returns
+        -------
+        request : dict
+
+        """
+        if code_cells is not None:
+            code_cells = _get_code_cells(code_cells)
+
+        req = {
+            'python_version': tuple(sys.version_info),
+            'ipb_version': __version__,
+            'ipb_class': self.__class__.__name__,
+            'code_cells': code_cells,
+            'secret': secret,
+            'grid_data': {
+                'lines_on': self.lines_on,
+                'width': self.width,
+                'height': self.height,
+                'blocks': self._to_simple_grid()
+            }
+        }
+
+        return req
+
+    def post_to_web(self, code_cells=None, secret=False):
+        """
+        Post this grid to ipythonblocks.org and return a URL to
+        view the grid on the web.
+
+        Parameters
+        ----------
+        code_cells : int, str, or slice, optional
+            Specify any code cells to be sent and displayed with the grid.
+            You can specify a single cell, a Python, slice, or a combination
+            as a string separated by commas.
+
+            For example, '3,5,8:10' would send cells 3, 5, 8, and 9.
+        secret : bool, optional
+            If True, this grid will not be shown randomly on ipythonblocks.org.
+
+        Returns
+        -------
+        url : str
+            URL to view your grid on ipythonblocks.org.
+
+        """
+        import requests
+
+        req = self._construct_post_request(code_cells, secret)
+        response = requests.post(_POST_URL, data=json.dumps(req))
+        response.raise_for_status()
+
+        return response.json()['url']
+
+    def _load_simple_grid(self, block_data):
+        """
+        Modify the grid to reflect the data in `block_data`, which
+        should be a nested list of tuples as produced by `_to_simple_grid`.
+
+        Parameters
+        ----------
+        block_data : list of lists
+            Nested list of tuples as produced by `_to_simple_grid`.
+
+        """
+        if len(block_data) != self.height or \
+                len(block_data[0]) != self.width:
+            raise ShapeMismatch('block_data must have same shape as grid.')
+
+        for row in range(self.height):
+            for col in range(self.width):
+                self._grid[row][col].rgb = block_data[row][col][:3]
+                self._grid[row][col].size = block_data[row][col][3]
+
+    @classmethod
+    def from_web(cls, grid_id, secret=False):
+        """
+        Make a new BlockGrid from a grid on ipythonblocks.org.
+
+        Parameters
+        ----------
+        grid_id : str
+            ID of a grid on ipythonblocks.org. This will be the part of the
+            URL after 'ipythonblocks.org/'.
+        secret : bool, optional
+            Whether or not the grid on ipythonblocks.org is secret.
+
+        Returns
+        -------
+        grid : BlockGrid
+
+        """
+        import requests
+
+        get_url = _GET_URL_PUBLIC if not secret else _GET_URL_SECRET
+        resp = requests.get(get_url.format(grid_id))
+        resp.raise_for_status()
+        grid_spec = resp.json()
+
+        grid = cls(grid_spec['width'], grid_spec['height'],
+                   lines_on=grid_spec['lines_on'])
+        grid._load_simple_grid(grid_spec['blocks'])
+
+        return grid
 
 
 class Pixel(Block):
@@ -626,7 +944,7 @@ class ImageGrid(BlockGrid):
         Length of the sides of grid blocks in pixels. One is the lower limit.
     lines_on : bool, optional
         Whether or not to display lines between blocks.
-    origin : {'lower-left', 'upper-left'}
+    origin : {'lower-left', 'upper-left'}, optional
         Set the location of the grid origin.
 
     Attributes
@@ -764,146 +1082,217 @@ class ImageGrid(BlockGrid):
 
         return _TABLE.format(uuid.uuid4(), int(self._lines_on), html)
 
+    @classmethod
+    def from_web(cls, grid_id, secret=False, origin='lower-left'):
+        """
+        Make a new ImageGrid from a grid on ipythonblocks.org.
 
-# As a convenience, provide the named HTML colors as a dictionary.
-colors = \
-    {'AliceBlue': (240, 248, 255),
-     'AntiqueWhite': (250, 235, 215),
-     'Aqua': (0, 255, 255),
-     'Aquamarine': (127, 255, 212),
-     'Azure': (240, 255, 255),
-     'Beige': (245, 245, 220),
-     'Bisque': (255, 228, 196),
-     'Black': (0, 0, 0),
-     'BlanchedAlmond': (255, 235, 205),
-     'Blue': (0, 0, 255),
-     'BlueViolet': (138, 43, 226),
-     'Brown': (165, 42, 42),
-     'BurlyWood': (222, 184, 135),
-     'CadetBlue': (95, 158, 160),
-     'Chartreuse': (127, 255, 0),
-     'Chocolate': (210, 105, 30),
-     'Coral': (255, 127, 80),
-     'CornflowerBlue': (100, 149, 237),
-     'Cornsilk': (255, 248, 220),
-     'Crimson': (220, 20, 60),
-     'Cyan': (0, 255, 255),
-     'DarkBlue': (0, 0, 139),
-     'DarkCyan': (0, 139, 139),
-     'DarkGoldenrod': (184, 134, 11),
-     'DarkGray': (169, 169, 169),
-     'DarkGreen': (0, 100, 0),
-     'DarkKhaki': (189, 183, 107),
-     'DarkMagenta': (139, 0, 139),
-     'DarkOliveGreen': (85, 107, 47),
-     'DarkOrange': (255, 140, 0),
-     'DarkOrchid': (153, 50, 204),
-     'DarkRed': (139, 0, 0),
-     'DarkSalmon': (233, 150, 122),
-     'DarkSeaGreen': (143, 188, 143),
-     'DarkSlateBlue': (72, 61, 139),
-     'DarkSlateGray': (47, 79, 79),
-     'DarkTurquoise': (0, 206, 209),
-     'DarkViolet': (148, 0, 211),
-     'DeepPink': (255, 20, 147),
-     'DeepSkyBlue': (0, 191, 255),
-     'DimGray': (105, 105, 105),
-     'DodgerBlue': (30, 144, 255),
-     'FireBrick': (178, 34, 34),
-     'FloralWhite': (255, 250, 240),
-     'ForestGreen': (34, 139, 34),
-     'Fuchsia': (255, 0, 255),
-     'Gainsboro': (220, 220, 220),
-     'GhostWhite': (248, 248, 255),
-     'Gold': (255, 215, 0),
-     'Goldenrod': (218, 165, 32),
-     'Gray': (128, 128, 128),
-     'Green': (0, 128, 0),
-     'GreenYellow': (173, 255, 47),
-     'Honeydew': (240, 255, 240),
-     'HotPink': (255, 105, 180),
-     'IndianRed': (205, 92, 92),
-     'Indigo': (75, 0, 130),
-     'Ivory': (255, 255, 240),
-     'Khaki': (240, 230, 140),
-     'Lavender': (230, 230, 250),
-     'LavenderBlush': (255, 240, 245),
-     'LawnGreen': (124, 252, 0),
-     'LemonChiffon': (255, 250, 205),
-     'LightBlue': (173, 216, 230),
-     'LightCoral': (240, 128, 128),
-     'LightCyan': (224, 255, 255),
-     'LightGoldenrodYellow': (250, 250, 210),
-     'LightGray': (211, 211, 211),
-     'LightGreen': (144, 238, 144),
-     'LightPink': (255, 182, 193),
-     'LightSalmon': (255, 160, 122),
-     'LightSeaGreen': (32, 178, 170),
-     'LightSkyBlue': (135, 206, 250),
-     'LightSlateGray': (119, 136, 153),
-     'LightSteelBlue': (176, 196, 222),
-     'LightYellow': (255, 255, 224),
-     'Lime': (0, 255, 0),
-     'LimeGreen': (50, 205, 50),
-     'Linen': (250, 240, 230),
-     'Magenta': (255, 0, 255),
-     'Maroon': (128, 0, 0),
-     'MediumAquamarine': (102, 205, 170),
-     'MediumBlue': (0, 0, 205),
-     'MediumOrchid': (186, 85, 211),
-     'MediumPurple': (147, 112, 219),
-     'MediumSeaGreen': (60, 179, 113),
-     'MediumSlateBlue': (123, 104, 238),
-     'MediumSpringGreen': (0, 250, 154),
-     'MediumTurquoise': (72, 209, 204),
-     'MediumVioletRed': (199, 21, 133),
-     'MidnightBlue': (25, 25, 112),
-     'MintCream': (245, 255, 250),
-     'MistyRose': (255, 228, 225),
-     'Moccasin': (255, 228, 181),
-     'NavajoWhite': (255, 222, 173),
-     'Navy': (0, 0, 128),
-     'OldLace': (253, 245, 230),
-     'Olive': (128, 128, 0),
-     'OliveDrab': (107, 142, 35),
-     'Orange': (255, 165, 0),
-     'OrangeRed': (255, 69, 0),
-     'Orchid': (218, 112, 214),
-     'PaleGoldenrod': (238, 232, 170),
-     'PaleGreen': (152, 251, 152),
-     'PaleTurquoise': (175, 238, 238),
-     'PaleVioletRed': (219, 112, 147),
-     'PapayaWhip': (255, 239, 213),
-     'PeachPuff': (255, 218, 185),
-     'Peru': (205, 133, 63),
-     'Pink': (255, 192, 203),
-     'Plum': (221, 160, 221),
-     'PowderBlue': (176, 224, 230),
-     'Purple': (128, 0, 128),
-     'Red': (255, 0, 0),
-     'RosyBrown': (188, 143, 143),
-     'RoyalBlue': (65, 105, 225),
-     'SaddleBrown': (139, 69, 19),
-     'Salmon': (250, 128, 114),
-     'SandyBrown': (244, 164, 96),
-     'SeaGreen': (46, 139, 87),
-     'Seashell': (255, 245, 238),
-     'Sienna': (160, 82, 45),
-     'Silver': (192, 192, 192),
-     'SkyBlue': (135, 206, 235),
-     'SlateBlue': (106, 90, 205),
-     'SlateGray': (112, 128, 144),
-     'Snow': (255, 250, 250),
-     'SpringGreen': (0, 255, 127),
-     'SteelBlue': (70, 130, 180),
-     'Tan': (210, 180, 140),
-     'Teal': (0, 128, 128),
-     'Thistle': (216, 191, 216),
-     'Tomato': (255, 99, 71),
-     'Turquoise': (64, 224, 208),
-     'Violet': (238, 130, 238),
-     'Wheat': (245, 222, 179),
-     'White': (255, 255, 255),
-     'WhiteSmoke': (245, 245, 245),
-     'Yellow': (255, 255, 0),
-     'YellowGreen': (154, 205, 50)}
+        Parameters
+        ----------
+        grid_id : str
+            ID of a grid on ipythonblocks.org. This will be the part of the
+            URL after 'ipythonblocks.org/'.
+        secret : bool, optional
+            Whether or not the grid on ipythonblocks.org is secret.
+        origin : {'lower-left', 'upper-left'}, optional
+            Set the location of the grid origin.
+
+        Returns
+        -------
+        grid : ImageGrid
+
+        """
+        import requests
+
+        get_url = _GET_URL_PUBLIC if not secret else _GET_URL_SECRET
+        resp = requests.get(get_url.format(grid_id))
+        resp.raise_for_status()
+        grid_spec = resp.json()
+
+        grid = cls(grid_spec['width'], grid_spec['height'],
+                   lines_on=grid_spec['lines_on'], origin=origin)
+        grid._load_simple_grid(grid_spec['blocks'])
+
+        return grid
+
+
+# As a convenience, provide some colors as a custom hybrid
+# dictionary and object with the color names as attributes
+class _ColorBunch(dict):
+    """
+    Customized dictionary that exposes its keys as attributes.
+
+    """
+    def __init__(self, colors):
+        super(_ColorBunch, self).__init__(colors)
+        self.__dict__.update(colors)
+
+
+# HTML colors
+colors = _ColorBunch({
+    'AliceBlue': (240, 248, 255),
+    'AntiqueWhite': (250, 235, 215),
+    'Aqua': (0, 255, 255),
+    'Aquamarine': (127, 255, 212),
+    'Azure': (240, 255, 255),
+    'Beige': (245, 245, 220),
+    'Bisque': (255, 228, 196),
+    'Black': (0, 0, 0),
+    'BlanchedAlmond': (255, 235, 205),
+    'Blue': (0, 0, 255),
+    'BlueViolet': (138, 43, 226),
+    'Brown': (165, 42, 42),
+    'BurlyWood': (222, 184, 135),
+    'CadetBlue': (95, 158, 160),
+    'Chartreuse': (127, 255, 0),
+    'Chocolate': (210, 105, 30),
+    'Coral': (255, 127, 80),
+    'CornflowerBlue': (100, 149, 237),
+    'Cornsilk': (255, 248, 220),
+    'Crimson': (220, 20, 60),
+    'Cyan': (0, 255, 255),
+    'DarkBlue': (0, 0, 139),
+    'DarkCyan': (0, 139, 139),
+    'DarkGoldenrod': (184, 134, 11),
+    'DarkGray': (169, 169, 169),
+    'DarkGreen': (0, 100, 0),
+    'DarkKhaki': (189, 183, 107),
+    'DarkMagenta': (139, 0, 139),
+    'DarkOliveGreen': (85, 107, 47),
+    'DarkOrange': (255, 140, 0),
+    'DarkOrchid': (153, 50, 204),
+    'DarkRed': (139, 0, 0),
+    'DarkSalmon': (233, 150, 122),
+    'DarkSeaGreen': (143, 188, 143),
+    'DarkSlateBlue': (72, 61, 139),
+    'DarkSlateGray': (47, 79, 79),
+    'DarkTurquoise': (0, 206, 209),
+    'DarkViolet': (148, 0, 211),
+    'DeepPink': (255, 20, 147),
+    'DeepSkyBlue': (0, 191, 255),
+    'DimGray': (105, 105, 105),
+    'DodgerBlue': (30, 144, 255),
+    'FireBrick': (178, 34, 34),
+    'FloralWhite': (255, 250, 240),
+    'ForestGreen': (34, 139, 34),
+    'Fuchsia': (255, 0, 255),
+    'Gainsboro': (220, 220, 220),
+    'GhostWhite': (248, 248, 255),
+    'Gold': (255, 215, 0),
+    'Goldenrod': (218, 165, 32),
+    'Gray': (128, 128, 128),
+    'Green': (0, 128, 0),
+    'GreenYellow': (173, 255, 47),
+    'Honeydew': (240, 255, 240),
+    'HotPink': (255, 105, 180),
+    'IndianRed': (205, 92, 92),
+    'Indigo': (75, 0, 130),
+    'Ivory': (255, 255, 240),
+    'Khaki': (240, 230, 140),
+    'Lavender': (230, 230, 250),
+    'LavenderBlush': (255, 240, 245),
+    'LawnGreen': (124, 252, 0),
+    'LemonChiffon': (255, 250, 205),
+    'LightBlue': (173, 216, 230),
+    'LightCoral': (240, 128, 128),
+    'LightCyan': (224, 255, 255),
+    'LightGoldenrodYellow': (250, 250, 210),
+    'LightGray': (211, 211, 211),
+    'LightGreen': (144, 238, 144),
+    'LightPink': (255, 182, 193),
+    'LightSalmon': (255, 160, 122),
+    'LightSeaGreen': (32, 178, 170),
+    'LightSkyBlue': (135, 206, 250),
+    'LightSlateGray': (119, 136, 153),
+    'LightSteelBlue': (176, 196, 222),
+    'LightYellow': (255, 255, 224),
+    'Lime': (0, 255, 0),
+    'LimeGreen': (50, 205, 50),
+    'Linen': (250, 240, 230),
+    'Magenta': (255, 0, 255),
+    'Maroon': (128, 0, 0),
+    'MediumAquamarine': (102, 205, 170),
+    'MediumBlue': (0, 0, 205),
+    'MediumOrchid': (186, 85, 211),
+    'MediumPurple': (147, 112, 219),
+    'MediumSeaGreen': (60, 179, 113),
+    'MediumSlateBlue': (123, 104, 238),
+    'MediumSpringGreen': (0, 250, 154),
+    'MediumTurquoise': (72, 209, 204),
+    'MediumVioletRed': (199, 21, 133),
+    'MidnightBlue': (25, 25, 112),
+    'MintCream': (245, 255, 250),
+    'MistyRose': (255, 228, 225),
+    'Moccasin': (255, 228, 181),
+    'NavajoWhite': (255, 222, 173),
+    'Navy': (0, 0, 128),
+    'OldLace': (253, 245, 230),
+    'Olive': (128, 128, 0),
+    'OliveDrab': (107, 142, 35),
+    'Orange': (255, 165, 0),
+    'OrangeRed': (255, 69, 0),
+    'Orchid': (218, 112, 214),
+    'PaleGoldenrod': (238, 232, 170),
+    'PaleGreen': (152, 251, 152),
+    'PaleTurquoise': (175, 238, 238),
+    'PaleVioletRed': (219, 112, 147),
+    'PapayaWhip': (255, 239, 213),
+    'PeachPuff': (255, 218, 185),
+    'Peru': (205, 133, 63),
+    'Pink': (255, 192, 203),
+    'Plum': (221, 160, 221),
+    'PowderBlue': (176, 224, 230),
+    'Purple': (128, 0, 128),
+    'Red': (255, 0, 0),
+    'RosyBrown': (188, 143, 143),
+    'RoyalBlue': (65, 105, 225),
+    'SaddleBrown': (139, 69, 19),
+    'Salmon': (250, 128, 114),
+    'SandyBrown': (244, 164, 96),
+    'SeaGreen': (46, 139, 87),
+    'Seashell': (255, 245, 238),
+    'Sienna': (160, 82, 45),
+    'Silver': (192, 192, 192),
+    'SkyBlue': (135, 206, 235),
+    'SlateBlue': (106, 90, 205),
+    'SlateGray': (112, 128, 144),
+    'Snow': (255, 250, 250),
+    'SpringGreen': (0, 255, 127),
+    'SteelBlue': (70, 130, 180),
+    'Tan': (210, 180, 140),
+    'Teal': (0, 128, 128),
+    'Thistle': (216, 191, 216),
+    'Tomato': (255, 99, 71),
+    'Turquoise': (64, 224, 208),
+    'Violet': (238, 130, 238),
+    'Wheat': (245, 222, 179),
+    'White': (255, 255, 255),
+    'WhiteSmoke': (245, 245, 245),
+    'Yellow': (255, 255, 0),
+    'YellowGreen': (154, 205, 50)
+})
+
+
+# Flat UI colors: http://flatuicolors.com/
+fui_colors = _ColorBunch({
+    'Alizarin': (231, 76, 60),
+    'Pomegranate': (192, 57, 43),
+    'Carrot': (230, 126, 34),
+    'Pumpkin': (211, 84, 0),
+    'SunFlower': (241, 196, 15),
+    'Orange': (243, 156, 18),
+    'Emerald': (46, 204, 113),
+    'Nephritis': (39, 174, 96),
+    'Turquoise': (26, 188, 156),
+    'GreenSea': (22, 160, 133),
+    'PeterRiver': (52, 152, 219),
+    'BelizeHole': (41, 128, 185),
+    'Amethyst': (155, 89, 182),
+    'Wisteria': (142, 68, 173),
+    'WetAsphalt': (52, 73, 94),
+    'MidnightBlue': (44, 62, 80),
+    'Concrete': (149, 165, 166),
+    'Asbestos': (127, 140, 141),
+    'Clouds': (236, 240, 241),
+    'Silver': (189, 195, 199)
+})
